@@ -1,0 +1,46 @@
+project_name: "reward-modeling-example"
+output_dir: "./output"
+use_wandb: false
+log_level: "INFO"
+device: "cuda"
+fp16: false
+
+model:
+  model_name_or_path: "gpt2"
+  model_type: "reward"
+  dropout_rate: 0.1
+  use_cache: true
+  gradient_checkpointing: false
+  freeze_backbone: false
+  max_length: 512
+
+training:
+  learning_rate: 5e-5
+  weight_decay: 0.01
+  num_train_epochs: 3
+  per_device_train_batch_size: 8
+  per_device_eval_batch_size: 16
+  gradient_accumulation_steps: 1
+  warmup_steps: 0
+  max_grad_norm: 1.0
+  logging_steps: 10
+  save_steps: 500
+  eval_steps: 500
+  save_total_limit: 2
+  seed: 42
+
+data:
+  dataset_path: "./data/preference_data.jsonl"
+  max_seq_length: 512
+  max_prompt_length: 128
+  train_split: 0.8
+  validation_split: 0.1
+  test_split: 0.1
+
+agent:
+  agent_type: "langchain"
+  reward_model_path: "./output/reward_model"
+  num_candidates: 3
+  temperature: 0.7
+  max_tokens: 512
+  top_p: 1.0 

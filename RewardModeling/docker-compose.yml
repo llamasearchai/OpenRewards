@@ -1,0 +1,464 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: reward_modeling_postgres
+    environment:
+      POSTGRES_DB: reward_modeling
+      POSTGRES_USER: rm_user
+      POSTGRES_PASSWORD: rm_password
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    networks:
+      - reward_modeling_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rm_user -d reward_modeling"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: reward_modeling_redis
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - reward_modeling_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # FastAPI Backend
+  api:
+    build:
+      context: ./python
+      dockerfile: Dockerfile
+      target: production
+    container_name: reward_modeling_api
+    environment:
+      - DATABASE_URL=postgresql://rm_user:rm_password@postgres:5432/reward_modeling
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET_KEY=your-super-secure-jwt-secret-key-change-in-production
+      - ENVIRONMENT=production
+      - LOG_LEVEL=INFO
+      - WORKERS=4
+      - MAX_CONNECTIONS=100
+      - RATE_LIMIT_ENABLED=true
+      - CORS_ORIGINS=http://localhost:3000,http://localhost:8080
+      - UPLOAD_MAX_SIZE=100MB
+      - MODEL_CACHE_SIZE=10GB
+      - WANDB_API_KEY=${WANDB_API_KEY:-}
+      - HF_TOKEN=${HF_TOKEN:-}
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./experiments:/app/experiments
+      - ./logs:/app/logs
+      - model_cache:/app/cache
+    ports:
+      - "8000:8000"
+    networks:
+      - reward_modeling_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+          cpus: '4.0'
+        reservations:
+          memory: 4G
+          cpus: '2.0'
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: reward_modeling_nginx
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./ui/dist:/usr/share/nginx/html:ro
+      - ./logs/nginx:/var/log/nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - reward_modeling_network
+    depends_on:
+      - api
+      - ui
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # React UI Development Server
+  ui:
+    build:
+      context: ./tauri/ui
+      dockerfile: Dockerfile
+      target: development
+    container_name: reward_modeling_ui_dev
+    environment:
+      - NODE_ENV=development
+      - REACT_APP_API_BASE_URL=http://localhost:8000
+      - REACT_APP_WS_URL=ws://localhost:8000/ws
+      - FAST_REFRESH=true
+      - CHOKIDAR_USEPOLLING=true
+    volumes:
+      - ./tauri/ui:/app
+      - /app/node_modules
+    ports:
+      - "3000:3000"
+    networks:
+      - reward_modeling_network
+    depends_on:
+      - api
+    restart: unless-stopped
+    profiles:
+      - development
+
+  # Jupyter Lab for Research and Development
+  jupyter:
+    build:
+      context: ./python
+      dockerfile: Dockerfile.jupyter
+    container_name: reward_modeling_jupyter
+    environment:
+      - JUPYTER_ENABLE_LAB=yes
+      - JUPYTER_TOKEN=reward_modeling_jupyter_token
+      - DATABASE_URL=postgresql://rm_user:rm_password@postgres:5432/reward_modeling
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - ./notebooks:/home/jovyan/notebooks
+      - ./python:/home/jovyan/reward_modeling
+      - ./data:/home/jovyan/data
+      - ./models:/home/jovyan/models
+      - ./experiments:/home/jovyan/experiments
+      - jupyter_data:/home/jovyan/.jupyter
+    ports:
+      - "8888:8888"
+    networks:
+      - reward_modeling_network
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+    profiles:
+      - development
+      - research
+
+  # MLflow Tracking Server
+  mlflow:
+    image: python:3.11-slim
+    container_name: reward_modeling_mlflow
+    command: >
+      bash -c "
+        pip install mlflow[extras] psycopg2-binary &&
+        mlflow server
+        --backend-store-uri postgresql://rm_user:rm_password@postgres:5432/reward_modeling
+        --default-artifact-root /mlflow/artifacts
+        --host 0.0.0.0
+        --port 5000
+      "
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+    volumes:
+      - mlflow_artifacts:/mlflow/artifacts
+    ports:
+      - "5000:5000"
+    networks:
+      - reward_modeling_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles:
+      - development
+      - research
+
+  # Weights & Biases Local Server (optional)
+  wandb-local:
+    image: wandb/local:latest
+    container_name: reward_modeling_wandb
+    environment:
+      - MYSQL=false
+      - LOCAL_USERNAME=admin
+      - LOCAL_PASSWORD=wandb_admin_password
+      - BUCKET=s3://wandb-artifacts
+    volumes:
+      - wandb_data:/vol
+    ports:
+      - "8080:8080"
+    networks:
+      - reward_modeling_network
+    restart: unless-stopped
+    profiles:
+      - development
+      - research
+
+  # Grafana for Monitoring
+  grafana:
+    image: grafana/grafana:latest
+    container_name: reward_modeling_grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=grafana_admin_password
+      - GF_INSTALL_PLUGINS=grafana-worldmap-panel,grafana-clock-panel
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    ports:
+      - "3001:3000"
+    networks:
+      - reward_modeling_network
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    profiles:
+      - monitoring
+
+  # Prometheus for Metrics Collection
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: reward_modeling_prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - reward_modeling_network
+    restart: unless-stopped
+    profiles:
+      - monitoring
+
+  # Node Exporter for System Metrics
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: reward_modeling_node_exporter
+    command:
+      - '--path.rootfs=/host'
+    volumes:
+      - '/:/host:ro,rslave'
+    ports:
+      - "9100:9100"
+    networks:
+      - reward_modeling_network
+    restart: unless-stopped
+    profiles:
+      - monitoring
+
+  # Training Worker
+  worker:
+    build:
+      context: ./python
+      dockerfile: Dockerfile
+      target: worker
+    container_name: reward_modeling_worker
+    environment:
+      - DATABASE_URL=postgresql://rm_user:rm_password@postgres:5432/reward_modeling
+      - REDIS_URL=redis://redis:6379
+      - WORKER_TYPE=training
+      - WORKER_CONCURRENCY=2
+      - LOG_LEVEL=INFO
+      - WANDB_API_KEY=${WANDB_API_KEY:-}
+      - HF_TOKEN=${HF_TOKEN:-}
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./experiments:/app/experiments
+      - ./logs:/app/logs
+      - model_cache:/app/cache
+      - /var/run/docker.sock:/var/run/docker.sock  # For GPU access
+    networks:
+      - reward_modeling_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 16G
+          cpus: '8.0'
+        reservations:
+          memory: 8G
+          cpus: '4.0'
+      # Uncomment for GPU support
+      # reservations:
+      #   devices:
+      #     - driver: nvidia
+      #       count: 1
+      #       capabilities: [gpu]
+
+  # Evaluation Worker
+  eval-worker:
+    build:
+      context: ./python
+      dockerfile: Dockerfile
+      target: worker
+    container_name: reward_modeling_eval_worker
+    environment:
+      - DATABASE_URL=postgresql://rm_user:rm_password@postgres:5432/reward_modeling
+      - REDIS_URL=redis://redis:6379
+      - WORKER_TYPE=evaluation
+      - WORKER_CONCURRENCY=4
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./experiments:/app/experiments
+      - ./logs:/app/logs
+      - model_cache:/app/cache
+    networks:
+      - reward_modeling_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+          cpus: '4.0'
+        reservations:
+          memory: 4G
+          cpus: '2.0'
+
+  # Agent Server
+  agent-server:
+    build:
+      context: ./python
+      dockerfile: Dockerfile
+      target: agent
+    container_name: reward_modeling_agent_server
+    environment:
+      - DATABASE_URL=postgresql://rm_user:rm_password@postgres:5432/reward_modeling
+      - REDIS_URL=redis://redis:6379
+      - AGENT_TYPE=dspy
+      - MAX_CONCURRENT_AGENTS=10
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./models:/app/models
+      - ./logs:/app/logs
+      - model_cache:/app/cache
+    ports:
+      - "8001:8001"
+    networks:
+      - reward_modeling_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2.0'
+        reservations:
+          memory: 2G
+          cpus: '1.0'
+
+  # File Server for Large Model Files
+  minio:
+    image: minio/minio:latest
+    container_name: reward_modeling_minio
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin123
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    networks:
+      - reward_modeling_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    profiles:
+      - storage
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  model_cache:
+    driver: local
+  jupyter_data:
+    driver: local
+  mlflow_artifacts:
+    driver: local
+  wandb_data:
+    driver: local
+  grafana_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  minio_data:
+    driver: local
+
+networks:
+  reward_modeling_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+# Docker Compose Profiles:
+# - Default: api, postgres, redis, nginx
+# - Development: add ui, jupyter, mlflow, wandb-local
+# - Research: add jupyter, mlflow, wandb-local
+# - Monitoring: add grafana, prometheus, node-exporter
+# - Storage: add minio
+# - Full: all services
+
+# Usage Examples:
+# docker-compose up -d                                    # Basic setup
+# docker-compose --profile development up -d              # Development setup
+# docker-compose --profile research up -d                 # Research setup  
+# docker-compose --profile monitoring up -d               # With monitoring
+# docker-compose --profile development --profile monitoring up -d  # Dev + monitoring

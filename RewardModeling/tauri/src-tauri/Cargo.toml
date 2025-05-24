@@ -1,0 +1,67 @@
+[package]
+name = "reward-modeling-ui"
+version = "0.1.0"
+description = "Advanced Reward Modeling Platform UI"
+authors = ["Reward Modeling Team"]
+license = "MIT"
+repository = "https://github.com/reward-modeling/platform"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[build-dependencies]
+tauri-build = { version = "1.5", features = [] }
+
+[dependencies]
+tauri = { version = "1.5", features = ["api-all", "system-tray", "updater"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+reqwest = { version = "0.11", features = ["json", "stream"] }
+anyhow = "1.0"
+thiserror = "1.0"
+uuid = { version = "1.0", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+log = "0.4"
+env_logger = "0.10"
+dirs = "5.0"
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "chrono", "uuid"] }
+sea-orm = { version = "0.12", features = ["sqlx-sqlite", "runtime-tokio-rustls", "macros", "chrono", "uuid"] }
+
+# System monitoring
+sysinfo = "0.29"
+psutil = "3.2"
+
+# File operations
+walkdir = "2.3"
+notify = "6.0"
+
+# Configuration
+config = "0.13"
+toml = "0.8"
+
+# WebSocket support
+tokio-tungstenite = "0.20"
+futures-util = "0.3"
+
+# HTTP client with retry logic
+reqwest-retry = "0.3"
+reqwest-middleware = "0.2"
+
+# Progress tracking
+indicatif = "0.17"
+
+[features]
+# This feature is used for production builds or when `devPath` points to the filesystem
+# DO NOT REMOVE!!
+custom-protocol = ["tauri/custom-protocol"]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.24"
+objc = "0.2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.48", features = ["Win32_Foundation", "Win32_System_SystemInformation"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.15"
